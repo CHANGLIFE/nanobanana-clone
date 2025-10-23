@@ -3,7 +3,7 @@ import OpenAI from 'openai'
 
 const openai = new OpenAI({
   baseURL: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY,
+  apiKey: process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY,
   defaultHeaders: {
     "HTTP-Referer": process.env.SITE_URL || "http://localhost:3001",
     "X-Title": process.env.SITE_NAME || "Nano Banana",
