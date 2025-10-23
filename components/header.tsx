@@ -3,9 +3,14 @@
 import { Button } from "@/components/ui/button"
 import { Moon, Sun } from "lucide-react"
 import { useEffect, useState } from "react"
+import { useAuth } from "@/contexts/AuthContext"
+import { LoginButton } from "@/components/auth/LoginButton"
+import { UserAvatar } from "@/components/auth/UserAvatar"
+import { AuthDropdown } from "@/components/auth/AuthDropdown"
 
 export function Header() {
   const [isDark, setIsDark] = useState(false)
+  const { user, loading } = useAuth()
 
   useEffect(() => {
     const isDarkMode = document.documentElement.classList.contains("dark")
@@ -44,7 +49,16 @@ export function Header() {
           <Button variant="ghost" size="icon" onClick={toggleTheme} className="rounded-full">
             {isDark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
           </Button>
-          <Button className="bg-primary hover:bg-primary/90 text-primary-foreground">Launch Now</Button>
+
+          {loading ? (
+            <Button disabled className="bg-primary hover:bg-primary/90 text-primary-foreground">
+              Loading...
+            </Button>
+          ) : user ? (
+            <UserAvatar />
+          ) : (
+            <AuthDropdown />
+          )}
         </div>
       </div>
     </header>
