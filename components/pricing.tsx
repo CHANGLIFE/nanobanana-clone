@@ -185,16 +185,16 @@ export function Pricing() {
     setLoadingPlan(planId)
 
     try {
-      // Use test payment endpoint in development
-      const paymentEndpoint = testMode ? '/api/test-payment' : '/api/creem/create-payment'
-
-      console.log('Creating payment session:', {
+      console.log('Creating Creem payment session:', {
         planId,
-        endpoint: paymentEndpoint,
-        testMode
+        planName: pricingPlans.find(p => p.id === planId)?.name,
+        price: pricingPlans.find(p => p.id === planId)?.price,
+        userId: user.id,
+        userEmail: user.email,
+        testMode: testMode
       })
 
-      const response = await fetch(paymentEndpoint, {
+      const response = await fetch('/api/creem/create-payment', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -204,13 +204,18 @@ export function Pricing() {
           planName: pricingPlans.find(p => p.id === planId)?.name,
           price: pricingPlans.find(p => p.id === planId)?.price,
           userId: user.id,
+          customerEmail: user.email,
         }),
       })
 
       const data = await response.json()
 
       if (data.success) {
-        console.log('Payment session created:', data)
+        console.log('Payment session created successfully:', {
+          sessionId: data.sessionId,
+          isTest: data.isTest
+        })
+
         // Redirect to payment page
         window.location.href = data.paymentUrl
       } else {

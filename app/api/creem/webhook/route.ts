@@ -1,23 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient } from '@supabase/supabase-js'
+import { createClient } from '@/lib/supabase/server'
+import { CreemAPI } from '@/lib/creem'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
-
-// Verify Creem webhook signature
-function verifyWebhookSignature(payload: string, signature: string, secret: string): boolean {
-  const crypto = require('crypto')
-  const expectedSignature = crypto
-    .createHmac('sha256', secret)
-    .update(payload)
-    .digest('hex')
-
-  return crypto.timingSafeEqual(
-    Buffer.from(signature, 'hex'),
-    Buffer.from(expectedSignature, 'hex')
-  )
+interface CreemWebhookEvent {
+  id: string
+  object: string
+  api_version: string
+  created: number
+  data: {
+    object: {
+      id?: string
+      status?: string
+      customer?: string
+      subscription?: string
+      amount_total?: number
+      currency?: string
+      payment_status?: string
+      metadata?: Record<string, any>
+      created?: number
+    }
+  }
+  type: string
 }
 
 export async function POST(request: NextRequest) {
@@ -34,16 +37,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify webhook signature
-    const webhookSecret = process.env.CREEM_WEBHOOK_SECRET
-    if (!webhookSecret) {
-      console.error('CREEM_WEBHOOK_SECRET environment variable is not set')
-      return NextResponse.json(
-        { error: 'Webhook configuration error' },
-        { status: 500 }
-      )
-    }
-
-    if (!verifyWebhookSignature(body, signature, webhookSecret)) {
+    if (!CreemAPI.verifyWebhookSignature(body, signature)) {
       console.error('Invalid webhook signature')
       return NextResponse.json(
         { error: 'Invalid signature' },
@@ -51,29 +45,63 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const event = JSON.parse(body)
-    console.log('Received Creem webhook event:', event.type)
+    console.log('Received Creem webhook event:', {
+      hasSignature: !!signature,
+      bodyLength: body.length
+    })
+
+    let event: CreemWebhookEvent
+    try {
+      event = JSON.parse(body)
+    } catch (parseError) {
+      console.error('Failed to parse webhook body:', parseError)
+      return NextResponse.json(
+        { error: 'Invalid JSON' },
+        { status: 400 }
+      )
+    }
+
+    console.log('Processing Creem webhook event:', {
+      id: event.id,
+      type: event.type,
+      object: event.object,
+      created: new Date(event.created * 1000).toISOString()
+    })
+
+    const supabase = await createClient()
 
     // Handle different event types
     switch (event.type) {
       case 'checkout.session.completed':
-        await handlePaymentSuccess(event.data)
+        await handlePaymentCompleted(event, supabase)
         break
 
-      case 'invoice.payment_succeeded':
-        await handleRecurringPayment(event.data)
+      case 'payment.succeeded':
+        await handlePaymentSucceeded(event, supabase)
         break
 
-      case 'invoice.payment_failed':
-        await handlePaymentFailure(event.data)
+      case 'invoice.paid':
+        await handleInvoicePaid(event, supabase)
+        break
+
+      case 'customer.subscription.created':
+        await handleSubscriptionCreated(event, supabase)
+        break
+
+      case 'customer.subscription.updated':
+        await handleSubscriptionUpdated(event, supabase)
         break
 
       case 'customer.subscription.deleted':
-        await handleSubscriptionCancellation(event.data)
+        await handleSubscriptionCancelled(event, supabase)
+        break
+
+      case 'payment.failed':
+        await handlePaymentFailed(event, supabase)
         break
 
       default:
-        console.log(`Unhandled event type: ${event.type}`)
+        console.log(`Unhandled webhook event type: ${event.type}`)
     }
 
     return NextResponse.json({ received: true })
@@ -81,156 +109,158 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Webhook processing error:', error)
     return NextResponse.json(
-      { error: 'Webhook processing failed' },
+      {
+        error: 'Webhook processing failed',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      },
       { status: 500 }
     )
   }
 }
 
-async function handlePaymentSuccess(sessionData: any) {
-  const { customer, metadata, subscription } = sessionData
-  const { planId, planName, userId } = metadata
+async function handlePaymentCompleted(event: CreemWebhookEvent, supabase: any) {
+  console.log('Handling payment completed event:', event.id)
 
-  console.log('Processing successful payment:', {
-    customerId: customer,
-    userId,
-    planId,
-    planName,
-    subscriptionId: subscription
-  })
+  const sessionData = event.data.object
 
-  try {
-    // Update user's subscription in database
-    const { error } = await supabase
-      .from('user_subscriptions')
-      .upsert({
-        user_id: userId,
-        plan_id: planId,
-        plan_name: planName,
-        creem_customer_id: customer,
-        creem_subscription_id: subscription,
-        status: 'active',
-        current_period_start: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
+  // Extract plan information from metadata
+  const metadata = sessionData.metadata || {}
+  const planId = metadata.planId || 'pro'
+  const planName = metadata.planName || 'Pro Plan'
+  const userId = metadata.userId || sessionData.customer
 
-    if (error) {
-      console.error('Database update error:', error)
-      throw error
-    }
+  // Update or create subscription record
+  const { data: subscription, error } = await supabase
+    .from('user_subscriptions')
+    .upsert({
+      user_id: userId,
+      plan_id: planId,
+      plan_name: planName,
+      creem_customer_id: sessionData.customer,
+      creem_subscription_id: sessionData.subscription,
+      creem_session_id: sessionData.id,
+      status: sessionData.payment_status === 'paid' ? 'active' : 'pending',
+      current_period_start: new Date().toISOString(),
+      current_period_end: sessionData.created ?
+        new Date(sessionData.created * 1000 + 30 * 24 * 60 * 60 * 1000).toISOString() : null
+    }, {
+      onConflict: 'creem_session_id'
+    })
+    .select()
+    .single()
 
-    // Add credits to user account
-    await addUserCredits(userId, planId)
-
-    console.log('Payment processed successfully for user:', userId)
-
-  } catch (error) {
-    console.error('Error processing payment success:', error)
+  if (error) {
+    console.error('Failed to update subscription:', error)
     throw error
   }
+
+  // Add credits if payment is successful
+  if (sessionData.payment_status === 'paid') {
+    await addCreditsToUser(userId, planId, supabase)
+  }
+
+  console.log('Payment completed webhook processed:', {
+    userId,
+    planId,
+    sessionId: sessionData.id,
+    subscriptionId: sessionData.subscription
+  })
 }
 
-async function handleRecurringPayment(invoiceData: any) {
-  const { customer, subscription } = invoiceData
+async function handlePaymentSucceeded(event: CreemWebhookEvent, supabase: any) {
+  console.log('Handling payment succeeded event:', event.id)
+  // Similar to payment completed
+  await handlePaymentCompleted(event, supabase)
+}
 
-  console.log('Processing recurring payment:', {
-    customerId: customer,
-    subscriptionId: subscription
-  })
+async function handleInvoicePaid(event: CreemWebhookEvent, supabase: any) {
+  console.log('Handling invoice paid event:', event.id)
 
-  try {
-    // Update subscription period
-    const { error } = await supabase
+  const invoiceData = event.data.object
+  if (invoiceData.subscription) {
+    // This is a subscription renewal
+    const { data: subscription } = await supabase
       .from('user_subscriptions')
       .update({
         status: 'active',
-        current_period_start: new Date().toISOString(),
-        updated_at: new Date().toISOString()
+        current_period_start: new Date().toISOString()
       })
-      .eq('creem_subscription_id', subscription)
-
-    if (error) {
-      console.error('Error updating subscription:', error)
-      throw error
-    }
-
-    // Get user and plan info to add credits
-    const { data: subscription } = await supabase
-      .from('user_subscriptions')
-      .select('user_id, plan_id')
-      .eq('creem_subscription_id', subscription)
+      .eq('creem_subscription_id', invoiceData.subscription)
+      .select()
       .single()
 
     if (subscription) {
-      await addUserCredits(subscription.user_id, subscription.plan_id)
-    }
+      const metadata = invoiceData.metadata || {}
+      const planId = metadata.planId || 'pro'
 
-  } catch (error) {
-    console.error('Error processing recurring payment:', error)
-    throw error
+      await addCreditsToUser(subscription.user_id, planId, supabase)
+      console.log('Subscription renewal processed:', {
+        subscriptionId: invoiceData.subscription,
+        userId: subscription.user_id
+      })
+    }
   }
 }
 
-async function handlePaymentFailure(invoiceData: any) {
-  const { customer, subscription } = invoiceData
+async function handleSubscriptionCreated(event: CreemWebhookEvent, supabase: any) {
+  console.log('Handling subscription created event:', event.id)
+  // Similar to payment completed
+  await handlePaymentCompleted(event, supabase)
+}
 
-  console.log('Processing payment failure:', {
-    customerId: customer,
-    subscriptionId: subscription
-  })
+async function handleSubscriptionUpdated(event: CreemWebhookEvent, supabase: any) {
+  console.log('Handling subscription updated event:', event.id)
 
-  try {
-    // Update subscription status
-    const { error } = await supabase
+  const subscriptionData = event.data.object
+  if (subscriptionData.customer && subscriptionData.id) {
+    await supabase
       .from('user_subscriptions')
       .update({
-        status: 'past_due',
+        status: 'active',
         updated_at: new Date().toISOString()
       })
-      .eq('creem_subscription_id', subscription)
-
-    if (error) {
-      console.error('Error updating subscription status:', error)
-      throw error
-    }
-
-  } catch (error) {
-    console.error('Error processing payment failure:', error)
-    throw error
+      .eq('creem_subscription_id', subscriptionData.id)
+      .select()
+      .single()
   }
 }
 
-async function handleSubscriptionCancellation(subscriptionData: any) {
-  const { customer, id } = subscriptionData
+async function handleSubscriptionCancelled(event: CreemWebhookEvent, supabase: any) {
+  console.log('Handling subscription cancelled event:', event.id)
 
-  console.log('Processing subscription cancellation:', {
-    customerId: customer,
-    subscriptionId: id
-  })
-
-  try {
-    // Update subscription status to cancelled
-    const { error } = await supabase
+  const subscriptionData = event.data.object
+  if (subscriptionData.customer && subscriptionData.id) {
+    await supabase
       .from('user_subscriptions')
       .update({
         status: 'cancelled',
         cancelled_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       })
-      .eq('creem_subscription_id', id)
-
-    if (error) {
-      console.error('Error processing subscription cancellation:', error)
-      throw error
-    }
-
-  } catch (error) {
-    console.error('Error handling subscription cancellation:', error)
-    throw error
+      .eq('creem_subscription_id', subscriptionData.id)
+      .select()
+      .single()
   }
 }
 
-async function addUserCredits(userId: string, planId: string) {
+async function handlePaymentFailed(event: CreemWebhookEvent, supabase: any) {
+  console.log('Handling payment failed event:', event.id)
+
+  const paymentData = event.data.object
+  if (paymentData.metadata && paymentData.metadata.session_id) {
+    await supabase
+      .from('user_subscriptions')
+      .update({
+        status: 'payment_failed',
+        updated_at: new Date().toISOString()
+      })
+      .eq('creem_session_id', paymentData.metadata.session_id)
+      .select()
+      .single()
+  }
+}
+
+async function addCreditsToUser(userId: string, planId: string, supabase: any) {
   const creditAmounts: { [key: string]: number } = {
     'free': 10,
     'pro': 500,
@@ -239,29 +269,40 @@ async function addUserCredits(userId: string, planId: string) {
 
   const credits = creditAmounts[planId] || 0
 
-  if (credits > 0) {
-    const { error } = await supabase
-      .from('user_credits')
-      .upsert({
-        user_id: userId,
-        credits: credits,
-        last_reset: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
+  const { error } = await supabase
+    .from('user_credits')
+    .upsert({
+      user_id: userId,
+      credits: credits,
+      last_reset: new Date().toISOString()
+    }, {
+      onConflict: 'user_id'
+    })
+    .select()
+    .single()
 
-    if (error) {
-      console.error('Error adding user credits:', error)
-      throw error
-    }
-
+  if (error) {
+    console.error('Failed to add credits:', error)
+  } else {
     console.log(`Added ${credits} credits to user ${userId}`)
   }
 }
 
-// Handle webhook verification requests from Creem
+// Verify webhook endpoint accessibility
 export async function GET() {
   return NextResponse.json({
-    status: 'webhook endpoint active',
-    timestamp: new Date().toISOString()
+    service: 'Creem Webhook Handler',
+    status: 'active',
+    version: '1.0.0',
+    testMode: CreemAPI.isInTestMode(),
+    events: [
+      'checkout.session.completed',
+      'payment.succeeded',
+      'invoice.paid',
+      'customer.subscription.created',
+      'customer.subscription.updated',
+      'customer.subscription.deleted',
+      'payment.failed'
+    ]
   })
 }

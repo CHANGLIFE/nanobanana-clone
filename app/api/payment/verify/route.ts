@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { CreemAPI } from '@/lib/creem'
 
 export async function GET(request: NextRequest) {
   try {
@@ -13,15 +14,23 @@ export async function GET(request: NextRequest) {
       )
     }
 
+    console.log('Verifying payment session:', {
+      sessionId,
+      testMode: CreemAPI.isInTestMode()
+    })
+
     // Check if this is a test session
-    const isTestSession = sessionId.startsWith('cs_test_') || sessionId.includes('test')
+    const isTestSession = CreemAPI.isInTestMode() ||
+      sessionId.startsWith('cs_test_') ||
+      sessionId.includes('test_session') ||
+      sessionId.startsWith('test_')
 
     if (isTestSession) {
       // Handle test payment verification
-      console.log('Verifying test payment session:', sessionId)
+      console.log('Processing test payment verification:', sessionId)
 
-      // Simulate test payment data based on session ID
-      let planId = 'pro' // default
+      // Extract plan info from session ID or use default
+      let planId = 'pro'
       let planName = 'Pro Plan'
       let credits = 500
 
@@ -35,6 +44,7 @@ export async function GET(request: NextRequest) {
         credits = 2000
       }
 
+      // In test mode, we don't need to check database, just return test data
       return NextResponse.json({
         success: true,
         sessionId,
@@ -42,58 +52,64 @@ export async function GET(request: NextRequest) {
         planId,
         credits,
         status: 'active',
-        amount: 9.99,
+        amount: planId === 'free' ? 0 : (planId === 'pro' ? 9.99 : 29.99),
         currency: 'USD',
         paymentDate: new Date().toISOString(),
-        isTest: true
+        isTest: true,
+        mode: 'test'
       })
     }
 
-    // Handle real Creem payment verification
-    const creemApiKey = process.env.CREEM_API_KEY
-    const creemApiBase = process.env.CREEM_API_BASE || 'https://api.creem.io'
-
-    if (!creemApiKey) {
-      console.error('CREEM_API_KEY environment variable is not set')
+    // Handle real payment verification
+    if (!CreemAPI.isConfigured()) {
+      console.error('Creem API not configured for real payment verification')
       return NextResponse.json(
-        { success: false, error: 'Payment service configuration error' },
+        {
+          success: false,
+          error: 'Payment verification service not configured',
+          details: 'Missing Creem API credentials'
+        },
         { status: 500 }
       )
     }
 
     try {
       // Retrieve session from Creem
-      const creemResponse = await fetch(`${creemApiBase}/v1/checkout/sessions/${sessionId}`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${creemApiKey}`,
-          'Content-Type': 'application/json',
-        }
-      })
+      const result = await CreemAPI.retrievePaymentSession(sessionId)
 
-      const sessionData = await creemResponse.json()
-
-      if (!creemResponse.ok) {
-        console.error('Creem API error:', sessionData)
+      if (!result.success || !result.data) {
+        console.error('Failed to retrieve payment session:', result.error)
         return NextResponse.json(
-          { success: false, error: 'Unable to verify payment', details: sessionData },
+          {
+            success: false,
+            error: 'Payment verification failed',
+            details: result.error?.message || result.error?.error || 'Unable to retrieve payment session'
+          },
           { status: 500 }
         )
       }
 
+      const sessionData = result.data!
+
       // Check if payment was successful
-      if (sessionData.payment_status !== 'paid') {
+      if (sessionData.payment_status !== 'paid' && sessionData.payment_status !== 'complete') {
+        console.log('Payment not completed:', {
+          sessionId,
+          status: sessionData.payment_status
+        })
+
         return NextResponse.json(
           {
             success: false,
             error: 'Payment not completed',
-            status: sessionData.payment_status
+            status: sessionData.payment_status,
+            details: `Payment status is: ${sessionData.payment_status}`
           },
           { status: 400 }
         )
       }
 
-      // Get user subscription details from database using our server client
+      // Get user subscription details from database
       const supabase = await createClient()
       const { data: subscription, error } = await supabase
         .from('user_subscriptions')
@@ -108,11 +124,78 @@ export async function GET(request: NextRequest) {
         .single()
 
       if (error || !subscription) {
-        console.error('Subscription not found:', error)
-        return NextResponse.json(
-          { success: false, error: 'Subscription information not found' },
-          { status: 404 }
-        )
+        console.error('Subscription not found in database:', error)
+
+        // For real payments, if no subscription found, create one
+        const planInfo = extractPlanInfo(sessionData.metadata || {})
+
+        const { data: newSubscription, error: createError } = await supabase
+          .from('user_subscriptions')
+          .upsert({
+            user_id: sessionData.customer || sessionData.metadata?.userId,
+            plan_id: planInfo.planId,
+            plan_name: planInfo.planName,
+            creem_customer_id: sessionData.customer,
+            creem_session_id: sessionId,
+            creem_subscription_id: sessionData.subscription,
+            status: 'active',
+            current_period_start: new Date().toISOString()
+          }, {
+            onConflict: 'creem_session_id'
+          })
+          .select()
+          .single()
+
+        if (createError) {
+          console.error('Failed to create subscription record:', createError)
+          return NextResponse.json(
+            {
+              success: false,
+              error: 'Failed to create subscription record',
+              details: createError.message
+            },
+            { status: 500 }
+          )
+        }
+
+        // Add credits for new subscription
+        const creditAmounts: { [key: string]: number } = {
+          'free': 10,
+          'pro': 500,
+          'enterprise': 2000
+        }
+
+        const credits = creditAmounts[planInfo.planId] || 0
+
+        const { data: creditsRecord, error: creditsError } = await supabase
+          .from('user_credits')
+          .upsert({
+            user_id: sessionData.customer || sessionData.metadata?.userId,
+            credits: credits,
+            last_reset: new Date().toISOString()
+          }, {
+            onConflict: 'user_id'
+          })
+          .select()
+          .single()
+
+        if (creditsError) {
+          console.error('Failed to create credits record:', creditsError)
+        }
+
+        return NextResponse.json({
+          success: true,
+          sessionId,
+          planName: planInfo.planName,
+          planId: planInfo.planId,
+          credits: credits,
+          status: 'active',
+          amount: (sessionData.amount_total || 0) / 100,
+          currency: sessionData.currency || 'USD',
+          paymentDate: new Date().toISOString(),
+          isTest: false,
+          newSubscription: true
+        })
       }
 
       // Get credit amounts for plans
@@ -131,44 +214,47 @@ export async function GET(request: NextRequest) {
         planId: subscription.plan_id,
         credits,
         status: subscription.status,
-        amount: sessionData.amount_total / 100, // Convert from cents to dollars
-        currency: sessionData.currency,
+        amount: (sessionData.amount_total || 0) / 100,
+        currency: sessionData.currency || 'USD',
         paymentDate: subscription.current_period_start,
         isTest: false
       })
 
-    } catch (creemError) {
-      console.warn('Creem verification failed, treating as test payment:', creemError)
-
-      // Fallback: treat unknown sessions as test payments
-      let planId = 'pro'
-      let planName = 'Pro Plan'
-      let credits = 500
-
-      return NextResponse.json({
-        success: true,
-        sessionId,
-        planName,
-        planId,
-        credits,
-        status: 'active',
-        amount: 9.99,
-        currency: 'USD',
-        paymentDate: new Date().toISOString(),
-        isTest: true,
-        fallback: 'creem_api_unavailable'
-      })
+    } catch (error) {
+      console.error('Payment verification error:', error)
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Payment verification failed',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        },
+        { status: 500 }
+      )
     }
-
   } catch (error) {
-    console.error('Payment verification error:', error)
+    console.error('Server error during payment verification:', error)
     return NextResponse.json(
       {
         success: false,
-        error: 'Payment verification failed',
+        error: 'Internal server error',
         details: error instanceof Error ? error.message : 'Unknown error'
       },
       { status: 500 }
     )
   }
+}
+
+function extractPlanInfo(metadata: Record<string, any>): { planId: string; planName: string } {
+  const planId = metadata.planId || 'pro'
+  const planName = metadata.planName || 'Pro Plan'
+
+  return { planId, planName }
+}
+
+export async function POST() {
+  return NextResponse.json({
+    message: 'Payment verification endpoint',
+    method: 'GET only',
+    status: 'active'
+  })
 }

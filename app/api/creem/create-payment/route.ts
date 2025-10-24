@@ -1,16 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
-
-interface CreemPaymentRequest {
-  planId: string
-  planName: string
-  price: number
-  userId: string
-  customerEmail?: string
-}
+import { CreemAPI, CreemPaymentRequest } from '@/lib/creem'
 
 export async function POST(request: NextRequest) {
   try {
-    const body: CreemPaymentRequest = await request.json()
+    // Parse request body
+    const body: CreemPaymentRequest & { planId: string; planName: string } = await request.json()
     const { planId, planName, price, userId, customerEmail } = body
 
     // Validate required fields
@@ -24,121 +18,103 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Get Creem API credentials from environment variables
-    const creemApiKey = process.env.CREEM_API_KEY
-    const creemApiBase = process.env.CREEM_API_BASE || 'https://api.creem.io'
-
-    if (!creemApiKey) {
-      console.error('CREEM_API_KEY environment variable is not set')
+    // Check Creem configuration
+    if (!CreemAPI.isConfigured()) {
+      console.error('Creem API not configured properly')
       return NextResponse.json(
         {
           success: false,
-          error: 'Payment service configuration error'
+          error: 'Payment service not configured',
+          details: 'Missing API credentials'
         },
         { status: 500 }
       )
     }
 
-    // Create payment session with Creem
-    const paymentData = {
-      amount: Math.round(price * 100), // Convert to cents
+    console.log('Creating Creem payment session:', {
+      planId,
+      planName,
+      amount: price,
+      userId,
+      testMode: CreemAPI.isInTestMode()
+    })
+
+    // Prepare payment request
+    const paymentRequest: CreemPaymentRequest = {
+      amount: price,
       currency: 'USD',
-      description: `Nano Banana ${planName} Plan`,
+      description: `Nano Banana ${planName} Subscription`,
       customer_id: userId,
+      customer_email: customerEmail,
       metadata: {
         planId,
         planName,
         userId,
-        type: 'subscription'
+        type: 'subscription',
+        source: 'nanobanana_web',
+        timestamp: new Date().toISOString()
       },
-      success_url: `${process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'}/pricing`,
-      billing_address_collection: 'required',
-      customer_email: customerEmail,
+      success_url: `${process.env.NEXT_PUBLIC_SITE_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.NEXT_PUBLIC_SITE_URL}/pricing`,
       payment_method_types: ['card', 'apple_pay', 'google_pay'],
-      mode: 'subscription' // For recurring payments
+      mode: 'subscription'
     }
 
-    console.log('Creating Creem payment session:', {
-      planId,
-      planName,
-      amount: paymentData.amount,
-      userId
-    })
+    // Create payment session
+    if (CreemAPI.isInTestMode()) {
+      // Use test payment
+      const testSession = CreemAPI.createTestPaymentSession(paymentRequest)
 
-    // Try Creem API first, fallback to test if it fails
-    let paymentUrl
-    let sessionId
-
-    try {
-      console.log('Making request to Creem API:', {
-        url: `${creemApiBase}/v1/checkout/sessions`,
-        apiKeyPresent: !!creemApiKey,
-        paymentData
+      console.log('Test payment session created:', {
+        sessionId: testSession.id,
+        amount: price,
+        planId
       })
 
-      const creemResponse = await fetch(`${creemApiBase}/v1/checkout/sessions`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${creemApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(paymentData)
+      return NextResponse.json({
+        success: true,
+        sessionId: testSession.id,
+        paymentUrl: testSession.url,
+        planId,
+        planName,
+        price,
+        isTest: true
       })
 
-      let creemData
-      try {
-        const responseText = await creemResponse.text()
-        console.log('Creem API response:', {
-          status: creemResponse.status,
-          statusText: creemResponse.statusText,
-          responseText: responseText.substring(0, 500) // First 500 chars
+    } else {
+      // Use real Creem API
+      const result = await CreemAPI.createPaymentSession(paymentRequest)
+
+      if (result.success && result.data) {
+        console.log('Real Creem payment session created:', {
+          sessionId: result.data.id,
+          amount: price,
+          planId
         })
 
-        if (responseText) {
-          creemData = JSON.parse(responseText)
-        }
-      } catch (parseError) {
-        console.error('Error parsing Creem response:', parseError)
-        creemData = { error: 'Invalid response format' }
-      }
-
-      if (creemResponse.ok && creemData.url) {
-        // Creem API succeeded
-        paymentUrl = creemData.url
-        sessionId = creemData.id
-        console.log('Creem payment session created successfully:', { sessionId, paymentUrl })
+        return NextResponse.json({
+          success: true,
+          sessionId: result.data.id,
+          paymentUrl: result.data.url,
+          planId,
+          planName,
+          price,
+          isTest: false
+        })
       } else {
-        throw new Error(creemData?.message || creemData?.error || 'Creem API failed')
+        console.error('Creem API error:', result.error)
+
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Payment session creation failed',
+            details: result.error?.message || result.error?.error || 'Unknown error',
+            code: result.error?.code
+          },
+          { status: 500 }
+        )
       }
-    } catch (creemError) {
-      console.warn('Creem API failed, using test payment fallback:', creemError)
-
-      // Fallback to test payment
-      sessionId = `cs_test_fallback_${Date.now()}`
-      paymentUrl = `${process.env.NEXT_PUBLIC_SITE_URL}/payment/success?session_id=${sessionId}`
-
-      console.log('Using test payment fallback:', { sessionId, paymentUrl })
     }
-
-    // Log payment session creation
-    console.log('Payment session created:', {
-      sessionId,
-      paymentUrl,
-      planId,
-      userId,
-      fallback: !paymentUrl?.includes('creem') ? 'test' : 'creem'
-    })
-
-    return NextResponse.json({
-      success: true,
-      sessionId,
-      paymentUrl,
-      planId,
-      planName,
-      price,
-      isTest: !paymentUrl?.includes('creem')
-    })
 
   } catch (error) {
     console.error('Error creating payment session:', error)
@@ -155,7 +131,10 @@ export async function POST(request: NextRequest) {
 
 export async function GET() {
   return NextResponse.json({
-    message: 'Creem payment API endpoint',
-    status: 'active'
+    service: 'Creem Payment API',
+    status: 'active',
+    testMode: CreemAPI.isInTestMode(),
+    configured: CreemAPI.isConfigured(),
+    version: '1.0.0'
   })
 }
