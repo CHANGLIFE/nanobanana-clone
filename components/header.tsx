@@ -31,6 +31,9 @@ export function Header() {
         </div>
 
         <nav className="hidden md:flex items-center gap-6">
+          <a href="/pricing" className="text-sm font-medium hover:text-primary transition-colors">
+            Pricing
+          </a>
           <a href="#editor" className="text-sm font-medium hover:text-primary transition-colors">
             Image Editor
           </a>
