@@ -47,6 +47,38 @@ function PaymentSuccessContent() {
     )
   }
 
+  // Show error state if payment verification failed
+  if (!isLoading && (!paymentStatus || !paymentStatus.success)) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-background to-muted/20 flex items-center justify-center p-4">
+        <Card className="max-w-md w-full text-center">
+          <CardHeader className="pb-4">
+            <div className="mx-auto mb-4">
+              <div className="h-16 w-16 bg-red-100 rounded-full flex items-center justify-center">
+                <span className="text-2xl">❌</span>
+              </div>
+            </div>
+            <CardTitle className="text-2xl text-red-600">Payment Verification Failed</CardTitle>
+            <CardDescription className="text-base">
+              We couldn't verify your payment. Please contact support.
+            </CardDescription>
+          </CardHeader>
+
+          <CardContent className="space-y-4">
+            <div className="space-y-3">
+              <Button asChild className="w-full">
+                <Link href="/pricing">
+                  <ArrowRight className="mr-2 h-4 w-4" />
+                  Back to Pricing
+                </Link>
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/20 flex items-center justify-center p-4">
       <Card className="max-w-md w-full text-center">
@@ -68,6 +100,9 @@ function PaymentSuccessContent() {
                 <p><span className="font-medium">Plan:</span> {paymentStatus.planName}</p>
                 <p><span className="font-medium">Credits:</span> {paymentStatus.credits} AI credits added</p>
                 <p><span className="font-medium">Status:</span> Active</p>
+                {paymentStatus.isTest && (
+                  <p className="text-orange-600"><span className="font-medium">Note:</span> This was a test payment</p>
+                )}
               </div>
             </div>
           )}
