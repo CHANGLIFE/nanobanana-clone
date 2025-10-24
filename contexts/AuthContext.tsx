@@ -33,11 +33,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const response = await fetch('/api/auth/user')
       const data = await response.json()
+      console.log('Auth API response:', { data })
 
       if (response.ok && data.user) {
         setUser(data.user)
+        console.log('User authenticated:', data.user.email)
       } else {
         setUser(null)
+        console.log('User not authenticated, using mock data')
       }
     } catch (error) {
       console.error('Auth check error:', error)
