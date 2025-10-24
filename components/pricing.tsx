@@ -89,6 +89,93 @@ export function Pricing() {
   // Test mode for development - remove in production
   const testMode = process.env.NODE_ENV === 'development'
 
+  const handleFreePlan = async () => {
+    if (!user) {
+      // Redirect to login or show login modal
+      return
+    }
+
+    setLoadingPlan('free')
+
+    try {
+      console.log('Activating Free plan for user:', user.id)
+
+      const response = await fetch('/api/subscription/activate-free', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId: user.id,
+          planId: 'free',
+          planName: 'Free Plan'
+        }),
+      })
+
+      const data = await response.json()
+
+      if (data.success) {
+        console.log('Free plan activated successfully')
+        alert('Free plan activated! You now have 10 AI credits.')
+        // Optionally refresh user data or redirect
+        window.location.reload()
+      } else {
+        console.error('Free plan activation failed:', data.error)
+        alert(`Failed to activate free plan: ${data.error}`)
+      }
+    } catch (error) {
+      console.error('Error activating free plan:', error)
+      alert('Failed to activate free plan. Please try again.')
+    } finally {
+      setLoadingPlan(null)
+    }
+  }
+
+  const handleEnterprisePlan = async () => {
+    if (!user) {
+      // Redirect to login or show login modal
+      return
+    }
+
+    setLoadingPlan('enterprise')
+
+    try {
+      console.log('Initiating Enterprise plan inquiry for user:', user.id)
+
+      const response = await fetch('/api/enterprise-inquiry', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          userId: user.id,
+          planId: 'enterprise',
+          planName: 'Enterprise Plan',
+          userEmail: user.email,
+          requirements: 'Interested in Enterprise plan'
+        }),
+      })
+
+      const data = await response.json()
+
+      if (data.success) {
+        console.log('Enterprise inquiry submitted successfully')
+        alert('Thank you for your interest! Our sales team will contact you within 24 hours.')
+
+        // Optionally redirect to a thank you page
+        // window.location.href = '/enterprise-thank-you'
+      } else {
+        console.error('Enterprise inquiry failed:', data.error)
+        alert(`Failed to submit inquiry: ${data.error}`)
+      }
+    } catch (error) {
+      console.error('Error submitting enterprise inquiry:', error)
+      alert('Failed to submit inquiry. Please try again or contact us directly.')
+    } finally {
+      setLoadingPlan(null)
+    }
+  }
+
   const handleSubscribe = async (planId: string) => {
     if (!user) {
       // Redirect to login or show login modal
@@ -220,9 +307,19 @@ export function Pricing() {
                     <Button
                       className="w-full"
                       variant={plan.popular ? "default" : "outline"}
-                      disabled={user?.plan === 'free'}
+                      onClick={() => handleFreePlan()}
+                      disabled={loadingPlan === plan.id}
                     >
-                      {user?.plan === 'free' ? 'Current Plan' : plan.buttonText}
+                      {loadingPlan === plan.id ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
+                          Processing...
+                        </>
+                      ) : user?.plan === 'free' ? (
+                        'Current Plan'
+                      ) : (
+                        plan.buttonText
+                      )}
                     </Button>
                   ) : (
                     <LoginButton className="w-full">
@@ -233,10 +330,19 @@ export function Pricing() {
                   <Button
                     className="w-full"
                     variant={plan.popular ? "default" : "outline"}
-                    onClick={() => window.location.href = 'mailto:sales@nanobanana.ai'}
+                    onClick={() => handleEnterprisePlan()}
+                    disabled={loadingPlan === plan.id || !user}
                   >
-                    Contact Sales
-                    <ArrowRight className="ml-2 h-4 w-4" />
+                    {loadingPlan === plan.id ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
+                        Processing...
+                      </>
+                    ) : !user ? (
+                      'Login Required'
+                    ) : (
+                      plan.buttonText
+                    )}
                   </Button>
                 ) : (
                   <Button

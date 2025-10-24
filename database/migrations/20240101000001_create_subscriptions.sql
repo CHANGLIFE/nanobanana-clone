@@ -139,7 +139,43 @@ CREATE TRIGGER create_user_subscription_trigger
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION create_user_subscription();
 
+-- Create enterprise_inquiries table for Enterprise plan inquiries
+CREATE TABLE IF NOT EXISTS enterprise_inquiries (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  plan_id VARCHAR(50) NOT NULL,
+  plan_name VARCHAR(100) NOT NULL,
+  user_email VARCHAR(255) NOT NULL,
+  requirements TEXT,
+  status VARCHAR(50) NOT NULL DEFAULT 'pending',
+  sales_notes TEXT,
+  contacted_at TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Create indexes for enterprise_inquiries
+CREATE INDEX IF NOT EXISTS idx_enterprise_inquiries_user_id ON enterprise_inquiries(user_id);
+CREATE INDEX IF NOT EXISTS idx_enterprise_inquiries_status ON enterprise_inquiries(status);
+CREATE INDEX IF NOT EXISTS idx_enterprise_inquiries_created_at ON enterprise_inquiries(created_at);
+
+-- Enable RLS for enterprise_inquiries
+ALTER TABLE enterprise_inquiries ENABLE ROW LEVEL SECURITY;
+
+-- RLS policies for enterprise_inquiries
+CREATE POLICY "Users can view own inquiries" ON enterprise_inquiries
+  FOR SELECT USING (auth.uid() = user_id);
+
+CREATE POLICY "Service role full access inquiries" ON enterprise_inquiries
+  FOR ALL USING (auth.role() = 'service_role');
+
+-- Create trigger for updated_at on enterprise_inquiries
+CREATE TRIGGER update_enterprise_inquiries_updated_at
+  BEFORE UPDATE ON enterprise_inquiries
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
 -- Comment on tables
 COMMENT ON TABLE user_subscriptions IS 'Stores user subscription information';
 COMMENT ON TABLE user_credits IS 'Stores user credit information';
 COMMENT ON TABLE payment_transactions IS 'Stores payment transaction history for audit purposes';
+COMMENT ON TABLE enterprise_inquiries IS 'Stores Enterprise plan inquiries and sales follow-up';
