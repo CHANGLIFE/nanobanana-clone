@@ -67,6 +67,12 @@ export async function POST(request: NextRequest) {
     })
 
     // Make request to Creem API
+    console.log('Making request to Creem API:', {
+      url: `${creemApiBase}/v1/checkout/sessions`,
+      apiKeyPresent: !!creemApiKey,
+      paymentData
+    })
+
     const creemResponse = await fetch(`${creemApiBase}/v1/checkout/sessions`, {
       method: 'POST',
       headers: {
@@ -76,15 +82,36 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify(paymentData)
     })
 
-    const creemData = await creemResponse.json()
+    let creemData
+    try {
+      const responseText = await creemResponse.text()
+      console.log('Creem API response:', {
+        status: creemResponse.status,
+        statusText: creemResponse.statusText,
+        responseText: responseText.substring(0, 500) // First 500 chars
+      })
+
+      if (responseText) {
+        creemData = JSON.parse(responseText)
+      }
+    } catch (parseError) {
+      console.error('Error parsing Creem response:', parseError)
+      creemData = { error: 'Invalid response format' }
+    }
 
     if (!creemResponse.ok) {
-      console.error('Creem API error:', creemData)
+      console.error('Creem API error details:', {
+        status: creemResponse.status,
+        statusText: creemResponse.statusText,
+        data: creemData
+      })
+
       return NextResponse.json(
         {
           success: false,
           error: 'Payment service unavailable',
-          details: creemData.error || 'Unknown error'
+          details: creemData?.message || creemData?.error || 'Unknown error',
+          statusCode: creemResponse.status
         },
         { status: 500 }
       )

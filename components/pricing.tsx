@@ -86,6 +86,8 @@ const pricingPlans: PricingPlan[] = [
 export function Pricing() {
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null)
   const { user } = useAuth()
+  // Test mode for development - remove in production
+  const testMode = process.env.NODE_ENV === 'development'
 
   const handleSubscribe = async (planId: string) => {
     if (!user) {
@@ -96,8 +98,16 @@ export function Pricing() {
     setLoadingPlan(planId)
 
     try {
-      // Create Creem payment session
-      const response = await fetch('/api/creem/create-payment', {
+      // Use test payment endpoint in development
+      const paymentEndpoint = testMode ? '/api/test-payment' : '/api/creem/create-payment'
+
+      console.log('Creating payment session:', {
+        planId,
+        endpoint: paymentEndpoint,
+        testMode
+      })
+
+      const response = await fetch(paymentEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -113,13 +123,16 @@ export function Pricing() {
       const data = await response.json()
 
       if (data.success) {
-        // Redirect to Creem payment page
+        console.log('Payment session created:', data)
+        // Redirect to payment page
         window.location.href = data.paymentUrl
       } else {
         console.error('Payment creation failed:', data.error)
+        alert(`Payment failed: ${data.error}${data.details ? ` - ${data.details}` : ''}`)
       }
     } catch (error) {
       console.error('Error creating payment:', error)
+      alert('Payment service is currently unavailable. Please try again later.')
     } finally {
       setLoadingPlan(null)
     }
@@ -128,6 +141,14 @@ export function Pricing() {
   return (
     <section className="py-20 bg-gradient-to-b from-background to-muted/20">
       <div className="container px-4 mx-auto">
+        {testMode && (
+          <div className="text-center mb-4">
+            <Badge variant="outline" className="text-xs">
+              🧪 Development Mode - Using Test Payments
+            </Badge>
+          </div>
+        )}
+
         <div className="text-center mb-16">
           <Badge className="mb-4" variant="secondary">
             Simple, Transparent Pricing
